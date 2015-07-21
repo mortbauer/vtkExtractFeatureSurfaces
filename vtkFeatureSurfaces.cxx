@@ -14,6 +14,7 @@
 =========================================================================*/
 #include "vtkFeatureSurfaces.h"
 
+#include "vtkSmartPointer.h"
 #include "vtkFloatArray.h"
 #include "vtkMath.h"
 #include "vtkMergePoints.h"
@@ -22,13 +23,14 @@
 #include "vtkObjectFactory.h"
 #include "vtkPolyData.h"
 #include "vtkPolygon.h"
+#include "vtkTriangle.h"
 #include "vtkStreamingDemandDrivenPipeline.h"
 #include "vtkTriangleStrip.h"
 #include "vtkUnsignedCharArray.h"
 #include "vtkCellArray.h"
 #include "vtkCellData.h"
 #include "vtkPointData.h"
-#include "vtkIncrementalPointLocator.h"
+#include <set>
 
 vtkStandardNewMacro(vtkFeatureSurfaces);
 
@@ -37,22 +39,11 @@ vtkStandardNewMacro(vtkFeatureSurfaces);
 vtkFeatureSurfaces::vtkFeatureSurfaces()
 {
   this->FeatureAngle = 30.0;
-  this->BoundaryEdges = 1;
-  this->FeatureEdges = 1;
-  this->NonManifoldEdges = 1;
-  this->ManifoldEdges = 0;
-  this->Coloring = 1;
-  this->Locator = NULL;
   this->OutputPointsPrecision = vtkAlgorithm::DEFAULT_PRECISION;
 }
 
 vtkFeatureSurfaces::~vtkFeatureSurfaces()
 {
-  if ( this->Locator )
-    {
-    this->Locator->UnRegister(this);
-    this->Locator = NULL;
-    }
 }
 
 // Generate feature edges for mesh
@@ -75,291 +66,170 @@ int vtkFeatureSurfaces::RequestData(
   double dotprod;
   vtkPoints *inPts;
   vtkPoints *newPts;
-  vtkFloatArray *newScalars = NULL;
+  vtkIntArray *family;
   vtkCellArray *newLines;
-  vtkPolyData *Mesh;
-  int i;
+  vtkTriangle *triangle;
+  int i,counter;
   vtkIdType j, numNei, cellId;
-  vtkIdType numBEdges, numNonManifoldEdges, numFedges, numManifoldEdges;
-  double scalar, n[3], x1[3], x2[3];
+  double scalar, n[3], x0[3], x1[3], x2[3],a;
   double cosAngle = 0;
-  vtkIdType lineIds[2];
   vtkIdType npts = 0;
   vtkIdType *pts = 0;
   vtkCellArray *inPolys, *inStrips, *newPolys;
   vtkFloatArray *polyNormals = NULL;
-  vtkIdType numPts, numCells, numPolys, numStrips, nei;
+  vtkIdType numPts, numCells, numPolys, nei;
   vtkIdList *neighbors;
-  vtkIdType p1, p2, newId;
-  vtkPointData *pd=input->GetPointData(), *outPD=output->GetPointData();
-  vtkCellData *cd=input->GetCellData(), *outCD=output->GetCellData();
-  unsigned char* ghostLevels=0;
-  unsigned char  updateLevel = static_cast<unsigned char>(
-    outInfo->Get(vtkStreamingDemandDrivenPipeline::UPDATE_NUMBER_OF_GHOST_LEVELS()));
+  vtkSmartPointer<vtkIdList> points;
+  vtkIdType p1, p2;
 
   vtkDebugMacro(<<"Executing feature edges");
 
-  vtkDataArray* temp = 0;
-  if (cd)
-    {
-    temp = cd->GetArray("vtkGhostLevels");
-    }
-  if ( (!temp) || (temp->GetDataType() != VTK_UNSIGNED_CHAR)
-       || (temp->GetNumberOfComponents() != 1))
-    {
-    vtkDebugMacro("No appropriate ghost levels field available.");
-    }
-  else
-    {
-    ghostLevels = static_cast<vtkUnsignedCharArray *>(temp)->GetPointer(0);
-    }
-
   //  Check input
   //
-  inPts=input->GetPoints();
+  inPts = input->GetPoints();
   numCells = input->GetNumberOfCells();
   numPolys = input->GetNumberOfPolys();
-  numStrips = input->GetNumberOfStrips();
-  if ( (numPts=input->GetNumberOfPoints()) < 1 || !inPts ||
-       (numPolys < 1 && numStrips < 1) )
+  numPts=input->GetNumberOfPoints();
+  if ( numPts < 1 || !inPts || (numCells < 1 ) )
     {
     vtkDebugMacro(<<"No input data!");
     return 1;
     }
 
-  if ( !this->BoundaryEdges && !this->NonManifoldEdges &&
-       !this->FeatureEdges && !this->ManifoldEdges )
-    {
-    vtkDebugMacro(<<"All edge types turned off!");
-    }
-
   // Build cell structure.  Might have to triangulate the strips.
-  Mesh = vtkPolyData::New();
-  Mesh->SetPoints(inPts);
-  inPolys=input->GetPolys();
-  if ( numStrips > 0 )
-    {
-    newPolys = vtkCellArray::New();
-    if ( numPolys > 0 )
-      {
-      newPolys->DeepCopy(inPolys);
-      }
-    else
-      {
-      newPolys->Allocate(newPolys->EstimateSize(numStrips,5));
-      }
-    inStrips = input->GetStrips();
-    for ( inStrips->InitTraversal(); inStrips->GetNextCell(npts,pts); )
-      {
-      vtkTriangleStrip::DecomposeStrip(npts, pts, newPolys);
-      }
-    Mesh->SetPolys(newPolys);
-    newPolys->Delete();
-    }
-  else
-    {
-    newPolys = inPolys;
-    Mesh->SetPolys(newPolys);
-    }
-  Mesh->BuildLinks();
+  output->DeepCopy(input);
+  output->BuildLinks();
+  newPolys = output->GetPolys();
 
-  // Allocate storage for lines/points (arbitrary allocation sizes)
-  //
-  newPts = vtkPoints::New();
-
-  // Set the desired precision for the points in the output.
-  if(this->OutputPointsPrecision == vtkAlgorithm::DEFAULT_PRECISION)
-    {
-    newPts->SetDataType(inPts->GetDataType());
-    }
-  else if(this->OutputPointsPrecision == vtkAlgorithm::SINGLE_PRECISION)
-    {
-    newPts->SetDataType(VTK_FLOAT);
-    }
-  else if(this->OutputPointsPrecision == vtkAlgorithm::DOUBLE_PRECISION)
-    {
-    newPts->SetDataType(VTK_DOUBLE);
-    }
-
-  newPts->Allocate(numPts/10,numPts);
-  newLines = vtkCellArray::New();
-  newLines->Allocate(numPts/10);
-  if ( this->Coloring )
-    {
-    newScalars = vtkFloatArray::New();
-    newScalars->SetName("Edge Types");
-    newScalars->Allocate(numCells/10,numCells);
-    }
-
-  outPD->CopyAllocate(pd, numPts);
-  outCD->CopyAllocate(cd, numCells);
-
-  // Get our locator for merging points
-  //
-  if ( this->Locator == NULL )
-    {
-    this->CreateDefaultLocator();
-    }
-  this->Locator->InitPointInsertion (newPts, input->GetBounds());
+  family = vtkIntArray::New();
+  family->SetName("Surface Family");
+  family->SetNumberOfTuples(numCells);
+  for (i=0;i<numCells;i++)
+  {
+    family->SetValue(i,-1);
+  }
 
   // Loop over all polygons generating boundary, non-manifold,
   // and feature edges
   //
-  if ( this->FeatureEdges )
-    {
-    polyNormals = vtkFloatArray::New();
-    polyNormals->SetNumberOfComponents(3);
-    polyNormals->Allocate(3*newPolys->GetNumberOfCells());
+  polyNormals = vtkFloatArray::New();
+  polyNormals->SetNumberOfComponents(3);
+  polyNormals->Allocate(3*newPolys->GetNumberOfCells());
 
-    for (cellId=0, newPolys->InitTraversal(); newPolys->GetNextCell(npts,pts);
-    cellId++)
-      {
-      vtkPolygon::ComputeNormal(inPts,npts,pts,n);
-      polyNormals->InsertTuple(cellId,n);
-      }
+  for (cellId=0, newPolys->InitTraversal(); newPolys->GetNextCell(npts,pts);
+  cellId++)
+  {
+    vtkPolygon::ComputeNormal(inPts,npts,pts,n);
+    polyNormals->InsertTuple(cellId,n);
+  }
 
-    cosAngle = cos( vtkMath::RadiansFromDegrees( this->FeatureAngle ) );
-    }
+  cosAngle = cos( vtkMath::RadiansFromDegrees( this->FeatureAngle ) );
 
   neighbors = vtkIdList::New();
   neighbors->Allocate(VTK_CELL_SIZE);
 
-  int abort=0;
-  vtkIdType progressInterval=numCells/20+1;
-
-  numBEdges = numNonManifoldEdges = numFedges = numManifoldEdges = 0;
-  for (cellId=0, newPolys->InitTraversal();
-       newPolys->GetNextCell(npts,pts) && !abort; cellId++)
+  // loop through created edges and assign family 
+  cellId = 0;
+  counter = 0;
+  int fam_counter = 0;
+  int is_edge = 0;
+  std::set<int> nextcells;
+  int seed = -1;
+  family->SetValue(cellId,fam_counter);
+  while(counter<numCells)
   {
-    if ( ! (cellId % progressInterval) ) //manage progress / early abort
-      {
-      this->UpdateProgress (static_cast<double>(cellId) / numCells);
-      abort = this->GetAbortExecute();
-      }
-
+    points = vtkIdList::New();
+    output->GetCellPoints(cellId,points);
+    npts = points->GetNumberOfIds();
+    double cellTuple[3];
+    polyNormals->GetTuple(cellId, cellTuple);
     for (i=0; i < npts; i++)
     {
-      p1 = pts[i];
-      p2 = pts[(i+1)%npts];
-
-      Mesh->GetCellEdgeNeighbors(cellId,p1,p2, neighbors);
+      p1 = points->GetId(i);
+      p2 = points->GetId((i+1)%npts);
+      output->GetCellEdgeNeighbors(cellId,p1,p2, neighbors);
       numNei = neighbors->GetNumberOfIds();
-
+      for (j=0,is_edge=0; j < numNei; j++)
+      {
+        nei=neighbors->GetId(j);
+        double neiTuple[3];
+        polyNormals->GetTuple(nei, neiTuple);
+        dotprod = vtkMath::Dot(neiTuple, cellTuple);
+        // filter all edges out which neighbouring faces are exactly opposite
+        if ( dotprod <= cosAngle && std::abs(dotprod+1) > precision)
+        {
+          is_edge = 1;
+          break;
+        }
+      }
       for (j=0; j < numNei; j++)
       {
-          // check to make sure that this edge hasn't been created before
-          if ((nei=neighbors->GetId(j)) < cellId )
-          {
-              continue;
-          }
-          double neiTuple[3];
-          double cellTuple[3];
-          polyNormals->GetTuple(nei, neiTuple);
-          polyNormals->GetTuple(cellId, cellTuple);
-          dotprod = vtkMath::Dot(neiTuple, cellTuple);
-          // filter all edges out which neighbouring faces are exactly opposite
-          if ( dotprod <= cosAngle && std::abs(dotprod+1) > precision)
-          {
-              numFedges++;
-              scalar = 0.444444;
-
-              // Add edge to output
-              Mesh->GetPoint(p1, x1);
-              Mesh->GetPoint(p2, x2);
-
-              if ( this->Locator->InsertUniquePoint(x1, lineIds[0]) )
-                {
-                outPD->CopyData (pd,p1,lineIds[0]);
-                }
-
-              if ( this->Locator->InsertUniquePoint(x2, lineIds[1]) )
-                {
-                outPD->CopyData (pd,p2,lineIds[1]);
-                }
-
-              newId = newLines->InsertNextCell(2,lineIds);
-              outCD->CopyData (cd,cellId,newId);
-              if ( this->Coloring )
-                {
-                newScalars->InsertTuple(newId, &scalar);
-                }
-          }
+        nei=neighbors->GetId(j);
+        // check to make sure that this edge hasn't been created before
+        if (family->GetValue(neighbors->GetId(j)) != -1)
+        {
+            continue;
+        }
+        else if (is_edge == 1 && seed == -1)
+        {
+          seed = nei;
+        }
+        else if (is_edge != 1)
+        {
+          family->SetValue(nei,fam_counter);
+          nextcells.insert(nei);
+          counter++;
+        }
+      }
+    }
+    if (!nextcells.empty())
+    {
+      cellId = *nextcells.begin();
+      nextcells.erase(nextcells.begin());
+    }
+    else if (seed != -1)
+    {
+      cellId = seed;
+      fam_counter++;
+      family->SetValue(cellId,fam_counter);
+      seed = -1;
+    }
+    else
+    {
+      for(i=0;i<numCells;i++)
+      {
+        if (family->GetValue(i) ==-1)
+        {
+          seed = i;
+          break;
+        }
+      }
+      if (seed == -1)
+      {
+        break;
       }
     }
   }
+  vtkDebugMacro(<<"Created " << fam_counter+1 << " distinct families");
+  cout <<"Created " << fam_counter+1 << " distinct families"<<endl;
 
-  vtkDebugMacro(<<"Created " << numBEdges << " boundary edges, "
-                << numNonManifoldEdges << " non-manifold edges, "
-                << numFedges << " feature edges, "
-                << numManifoldEdges << " manifold edges");
-
+  //for (i=0;i<numCells;i++)
+  //{
+    //family->SetValue(i,family->GetValue(i)/fam_counter);
+  //}
   //  Update ourselves.
   //
-  if ( this->FeatureEdges )
-    {
-    polyNormals->Delete();
-    }
+  polyNormals->Delete();
 
-  Mesh->Delete();
-
-  output->SetPoints(newPts);
-  newPts->Delete();
   neighbors->Delete();
 
-  output->SetLines(newLines);
-  newLines->Delete();
-  this->Locator->Initialize();//release any extra memory
-  if ( this->Coloring )
-    {
-    int idx = outCD->AddArray(newScalars);
-    outCD->SetActiveAttribute(idx, vtkDataSetAttributes::SCALARS);
-    newScalars->Delete();
-    }
-
+  //output->GetCellData()->SetScalars(family);
+  int idx = output->GetCellData()->AddArray(family);
+  output->GetCellData()->SetActiveAttribute(idx, vtkDataSetAttributes::SCALARS);
+  family->Delete();
   return 1;
 }
 
-void vtkFeatureSurfaces::CreateDefaultLocator()
-{
-  if ( this->Locator == NULL )
-    {
-    this->Locator = vtkMergePoints::New();
-    }
-}
-
-// Specify a spatial locator for merging points. By
-// default an instance of vtkMergePoints is used.
-void vtkFeatureSurfaces::SetLocator(vtkIncrementalPointLocator *locator)
-{
-  if ( this->Locator == locator )
-    {
-    return;
-    }
-  if ( this->Locator )
-    {
-    this->Locator->UnRegister(this);
-    this->Locator = NULL;
-    }
-  if ( locator )
-    {
-    locator->Register(this);
-    }
-  this->Locator = locator;
-  this->Modified();
-}
-
-unsigned long int vtkFeatureSurfaces::GetMTime()
-{
-  unsigned long mTime=this->Superclass::GetMTime();
-  unsigned long time;
-
-  if ( this->Locator != NULL )
-    {
-    time = this->Locator->GetMTime();
-    mTime = ( time > mTime ? time : mTime );
-    }
-  return mTime;
-}
 
 int vtkFeatureSurfaces::RequestUpdateExtent(
   vtkInformation *vtkNotUsed(request),
@@ -370,18 +240,10 @@ int vtkFeatureSurfaces::RequestUpdateExtent(
   vtkInformation *inInfo = inputVector[0]->GetInformationObject(0);
   vtkInformation *outInfo = outputVector->GetInformationObject(0);
 
-  int numPieces, ghostLevel;
+  int numPieces;
 
   numPieces =
     outInfo->Get(vtkStreamingDemandDrivenPipeline::UPDATE_NUMBER_OF_PIECES());
-  ghostLevel =
-    outInfo->Get(vtkStreamingDemandDrivenPipeline::UPDATE_NUMBER_OF_GHOST_LEVELS());
-
-  if (numPieces > 1)
-    {
-    inInfo->Set(vtkStreamingDemandDrivenPipeline::UPDATE_NUMBER_OF_GHOST_LEVELS(),
-                ghostLevel + 1);
-    }
 
   return 1;
 }
@@ -391,20 +253,6 @@ void vtkFeatureSurfaces::PrintSelf(ostream& os, vtkIndent indent)
   this->Superclass::PrintSelf(os,indent);
 
   os << indent << "Feature Angle: " << this->FeatureAngle << "\n";
-  os << indent << "Boundary Edges: " << (this->BoundaryEdges ? "On\n" : "Off\n");
-  os << indent << "Feature Edges: " << (this->FeatureEdges ? "On\n" : "Off\n");
-  os << indent << "Non-Manifold Edges: " << (this->NonManifoldEdges ? "On\n" : "Off\n");
-  os << indent << "Manifold Edges: " << (this->ManifoldEdges ? "On\n" : "Off\n");
-  os << indent << "Coloring: " << (this->Coloring ? "On\n" : "Off\n");
-
-  if ( this->Locator )
-    {
-    os << indent << "Locator: " << this->Locator << "\n";
-    }
-  else
-    {
-    os << indent << "Locator: (none)\n";
-    }
-
   os << indent << "Output Points Precision: " << this->OutputPointsPrecision << "\n";
 }
+

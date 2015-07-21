@@ -52,53 +52,9 @@ public:
   static vtkFeatureSurfaces *New();
 
   // Description:
-  // Turn on/off the extraction of boundary edges.
-  vtkSetMacro(BoundaryEdges,int);
-  vtkGetMacro(BoundaryEdges,int);
-  vtkBooleanMacro(BoundaryEdges,int);
-
-  // Description:
-  // Turn on/off the extraction of feature edges.
-  vtkSetMacro(FeatureEdges,int);
-  vtkGetMacro(FeatureEdges,int);
-  vtkBooleanMacro(FeatureEdges,int);
-
-  // Description:
   // Specify the feature angle for extracting feature edges.
   vtkSetClampMacro(FeatureAngle,double,0.0,180.0);
   vtkGetMacro(FeatureAngle,double);
-
-  // Description:
-  // Turn on/off the extraction of non-manifold edges.
-  vtkSetMacro(NonManifoldEdges,int);
-  vtkGetMacro(NonManifoldEdges,int);
-  vtkBooleanMacro(NonManifoldEdges,int);
-
-  // Description:
-  // Turn on/off the extraction of manifold edges.
-  vtkSetMacro(ManifoldEdges,int);
-  vtkGetMacro(ManifoldEdges,int);
-  vtkBooleanMacro(ManifoldEdges,int);
-
-  // Description:
-  // Turn on/off the coloring of edges by type.
-  vtkSetMacro(Coloring,int);
-  vtkGetMacro(Coloring,int);
-  vtkBooleanMacro(Coloring,int);
-
-  // Description:
-  // Set / get a spatial locator for merging points. By
-  // default an instance of vtkMergePoints is used.
-  void SetLocator(vtkIncrementalPointLocator *locator);
-  vtkGetObjectMacro(Locator,vtkIncrementalPointLocator);
-
-  // Description:
-  // Create default locator. Used to create one when none is specified.
-  void CreateDefaultLocator();
-
-  // Description:
-  // Return MTime also considering the locator.
-  unsigned long GetMTime();
 
   // Description:
   // Set/get the desired precision for the output types. See the documentation
@@ -116,13 +72,7 @@ protected:
   int RequestUpdateExtent(vtkInformation *, vtkInformationVector **, vtkInformationVector *);
 
   double FeatureAngle;
-  int BoundaryEdges;
-  int FeatureEdges;
-  int NonManifoldEdges;
-  int ManifoldEdges;
-  int Coloring;
   int OutputPointsPrecision;
-  vtkIncrementalPointLocator *Locator;
 private:
   vtkFeatureSurfaces(const vtkFeatureSurfaces&);  // Not implemented.
   void operator=(const vtkFeatureSurfaces&);  // Not implemented.
