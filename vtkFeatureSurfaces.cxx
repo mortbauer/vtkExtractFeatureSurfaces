@@ -30,6 +30,7 @@
 #include "vtkCellArray.h"
 #include "vtkCellData.h"
 #include "vtkPointData.h"
+#include "vtkMultiBlockDataSet.h"
 #include <set>
 
 vtkStandardNewMacro(vtkFeatureSurfaces);
@@ -66,13 +67,13 @@ int vtkFeatureSurfaces::RequestData(
   double dotprod;
   vtkPoints *inPts;
   vtkPoints *newPts;
-  vtkIntArray *family;
-  vtkCellArray *newLines;
+  vtkSmartPointer<vtkIntArray> family;
   vtkTriangle *triangle;
   int i,counter;
   vtkIdType j, numNei, cellId;
   double scalar, n[3], x0[3], x1[3], x2[3],a;
   double cosAngle = 0;
+  vtkIdType lineIds[2];
   vtkIdType npts = 0;
   vtkIdType *pts = 0;
   vtkCellArray *inPolys, *inStrips, *newPolys;
@@ -81,6 +82,7 @@ int vtkFeatureSurfaces::RequestData(
   vtkIdList *neighbors;
   vtkSmartPointer<vtkIdList> points;
   vtkIdType p1, p2;
+  vtkMultiBlockDataSet *blocks = vtkMultiBlockDataSet::New();
 
   vtkDebugMacro(<<"Executing feature edges");
 
@@ -102,8 +104,8 @@ int vtkFeatureSurfaces::RequestData(
   newPolys = output->GetPolys();
 
   family = vtkIntArray::New();
-  family->SetName("Surface Family");
-  family->SetNumberOfTuples(numCells);
+  family->SetName("SurfaceFamily");
+  family->SetNumberOfValues(numCells);
   for (i=0;i<numCells;i++)
   {
     family->SetValue(i,-1);
@@ -136,6 +138,10 @@ int vtkFeatureSurfaces::RequestData(
   std::set<int> nextcells;
   int seed = -1;
   family->SetValue(cellId,fam_counter);
+  vtkPolyData *part;
+  vtkCellArray *lines = vtkCellArray::New();
+  lines->Allocate(numPts/10);
+  int seedfinder_counter = 0;
   while(counter<numCells)
   {
     points = vtkIdList::New();
@@ -159,26 +165,29 @@ int vtkFeatureSurfaces::RequestData(
         if ( dotprod <= cosAngle && std::abs(dotprod+1) > precision)
         {
           is_edge = 1;
+          if (seed == -1 && family->GetValue(nei) == -1)
+          {
+            seed = nei;
+          }
           break;
         }
       }
-      for (j=0; j < numNei; j++)
+      if (is_edge != 1)
       {
-        nei=neighbors->GetId(j);
-        // check to make sure that this edge hasn't been created before
-        if (family->GetValue(neighbors->GetId(j)) != -1)
+        for (j=0; j < numNei; j++)
         {
-            continue;
-        }
-        else if (is_edge == 1 && seed == -1)
-        {
-          seed = nei;
-        }
-        else if (is_edge != 1)
-        {
-          family->SetValue(nei,fam_counter);
-          nextcells.insert(nei);
-          counter++;
+          nei=neighbors->GetId(j);
+          // check to make sure that this edge hasn't been created before
+          if (family->GetValue(nei) != -1)
+          {
+              continue;
+          }
+          else
+          {
+            family->SetValue(nei,fam_counter);
+            nextcells.insert(nei);
+            counter++;
+          }
         }
       }
     }
@@ -196,21 +205,27 @@ int vtkFeatureSurfaces::RequestData(
     }
     else
     {
+      cellId = -1;
       for(i=0;i<numCells;i++)
       {
         if (family->GetValue(i) ==-1)
         {
-          seed = i;
+          cellId = i;
+          fam_counter++;
+          family->SetValue(cellId,fam_counter);
+          seed = -1;
+          seedfinder_counter++;
           break;
         }
       }
-      if (seed == -1)
+      if (cellId == -1)
       {
         break;
       }
     }
   }
   vtkDebugMacro(<<"Created " << fam_counter+1 << " distinct families");
+  cout <<"looked " << seedfinder_counter+1 << " for seeds"<<endl;
   cout <<"Created " << fam_counter+1 << " distinct families"<<endl;
 
   //for (i=0;i<numCells;i++)
@@ -226,7 +241,7 @@ int vtkFeatureSurfaces::RequestData(
   //output->GetCellData()->SetScalars(family);
   int idx = output->GetCellData()->AddArray(family);
   output->GetCellData()->SetActiveAttribute(idx, vtkDataSetAttributes::SCALARS);
-  family->Delete();
+  //family->Delete();
   return 1;
 }
 
